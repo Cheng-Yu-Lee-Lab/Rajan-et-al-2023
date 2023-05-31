@@ -1,0 +1,156 @@
+---
+title: fru_normalization
+output: html_notebook
+---
+Make z-score bigwigs, see: https://github.com/tjgibson/NGS-workflow-chipseq/blob/main/workflow/scripts/zscore_normalize_bw.R 
+```{r}
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(rtracklayer))
+suppressPackageStartupMessages(library(GenomicRanges))
+              
+zscore_bw <- function(bw) {
+  require(tidyverse)
+  require(rtracklayer)
+  require(GenomicRanges)
+  
+  # import bigwig file to Granges
+  if (typeof(bw) == "character") {
+    message("reading bigwig file")
+    bw <- import(bw)
+  }
+  
+  # for large regions with the same score, expand into equal sized bins
+  message("binning genome")
+  min_binsize <- min(width(bw))
+  all_bins <- tileGenome(seqinfo(bw), tilewidth=min_binsize,cut.last.tile.in.chrom=TRUE)
+  
+  message("getting scores for all bins")
+  # add the coverage/score for both input and IP
+  all_bins <- subsetByOverlaps(all_bins, bw)
+  overlaps <- findOverlaps(all_bins, bw)
+  all_bins$score[overlaps@from] <- bw$score[overlaps@to]
+  
+  # perform z-score normalization
+  message("performing z-score normalization")
+  all_bins$zscore <- scale(all_bins$score)[,1]
+  all_bins$score <- NULL
+  all_bins$score <- all_bins$zscore
+  all_bins$zscore <- NULL
+  # collapse adjacent bins with same score
+  collapsed <- unlist(GenomicRanges::reduce(split(all_bins, ~score)))
+  collapsed$score <- as.numeric(names(collapsed))
+  names(collapsed) <- NULL
+  all_bins <- collapsed
+  
+  #set seqinfo for z-score normalized version
+  seqinfo(all_bins) <- seqinfo(bw)
+  
+  return(all_bins)
+}
+
+# perform z-score normalization and write new bigwig files ---------------------
+files <- list.files(path="bigwigs/", pattern="*.bw", full.names=TRUE, recursive=FALSE)
+for (f in files){
+  out = paste("bigwigs/z-score/",basename(f), sep="")
+  zscore.gr <- zscore_bw(f)
+  export(zscore.gr, out)
+}
+
+```
+
+
+Quantify reads in GoPeaks for histone normalization purposes
+```{r}
+suppressPackageStartupMessages(library("Rsubread"))
+filenames_H3K4me3 = c("bam/H3K4me3_rep1_6044.bam", "bam/H3K4me3_rep2_6044.bam", "bam/H3K4me3-fruDF_rep1_6044.bam", "bam/H3K4me3-fruDF_rep2_6044.bam")
+filenames_H3K27me3 = c("bam/H3K27me3_rep1_5127.bam", "bam/H3K27me3_rep2_5127.bam", "bam/H3K27me3-fruDF_rep1_5127.bam", "bam/H3K27me3-fruDF_rep2_5127.bam")
+filenames_H3K27ac = c("bam/H3K27ac-fruDF_rep2_5127.bam", "bam/H3K27ac-fruDF_rep1_5127.bam", "bam/H3K27ac_rep2_5127.bam", "bam/H3K27ac_rep1_5127.bam")
+
+H3K4me3_raw <- featureCounts(files = filenames_H3K4me3,
+                  annot.ext = "regions/gopeaks/saf/H3K4me3_narrow.saf",
+                  isPairedEnd=FALSE,
+                  ignoreDup =TRUE,
+                  nthreads=128)
+
+H3K27me3_raw <- featureCounts(files = filenames_H3K27me3,
+                  annot.ext = "regions/gopeaks/saf/H3K27me3_broad.saf",
+                  isPairedEnd=TRUE,
+                  nthreads=128)
+
+H3K27ac_raw <- featureCounts(files = filenames_H3K27ac,
+                  annot.ext = "regions/gopeaks/saf/H3K27ac_broad.saf",
+                  isPairedEnd=TRUE,
+                  nthreads=128)
+
+
+ save(H3K4me3_raw, file="data/H3K4me3_raw-featureCounts_data")
+ save(H3K27me3_raw, file="data/H3K27me3_raw-featureCounts_data")
+ save(H3K27ac_raw, file="data/H3K27ac_raw-featureCounts_data")
+```
+
+Calculate sizefactors using edgeR
+```{r}
+suppressPackageStartupMessages(library('edgeR'))
+normFactor_H3K4me3 <- calcNormFactors(object = H3K4me3_raw$counts, method = "TMM")
+LibSize_H3K4me3 <- colSums(H3K4me3_raw$counts)
+SizeFactors_H3K4me3 <- normFactor_H3K4me3 * LibSize_H3K4me3 / 1000000
+SizeFactors_H3K4me3.reciprocal <- 1/SizeFactors_H3K4me3
+SizeFactors_H3K4me3.reciprocal
+
+normFactor_H3K27me3 <- calcNormFactors(object = H3K27me3_raw$counts, method = "TMM")
+LibSize_H3K27me3 <- colSums(H3K27me3_raw$counts)
+SizeFactors_H3K27me3 <- normFactor_H3K27me3 * LibSize_H3K27me3 / 1000000
+SizeFactors_H3K27me3.reciprocal <- 1/SizeFactors_H3K27me3
+SizeFactors_H3K27me3.reciprocal
+
+normFactor_H3K27ac <- calcNormFactors(object = H3K27ac_raw$counts, method = "TMM")
+LibSize_H3K27ac <- colSums(H3K27ac_raw$counts)
+SizeFactors_H3K27ac <- normFactor_H3K27ac * LibSize_H3K27ac / 1000000
+SizeFactors_H3K27ac.reciprocal <- 1/SizeFactors_H3K27ac
+SizeFactors_H3K27ac.reciprocal
+
+normFactor_Kac <- calcNormFactors(object = Kac_raw$counts, method = "TMM")
+LibSize_Kac <- colSums(Kac_raw$counts)
+SizeFactors_Kac <- normFactor_Kac * LibSize_Kac / 1000000
+SizeFactors_Kac.reciprocal <- 1/SizeFactors_Kac
+SizeFactors_Kac.reciprocal
+```
+
+Figure 5G: Count reads / basepair in Fru Peaks or Pc Domains 
+```{r}
+library("Rsubread")
+filenames_H3K27me3 = c("bam/H3K27me3_rep1_5127.bam", "bam/H3K27me3_rep2_5127.bam")
+
+
+H3K27me3_poly_peak <- featureCounts(files = filenames_H3K27me3,
+                  annot.ext = "regions/sicer/polycomb.saf",
+                  isPairedEnd=TRUE,
+                  nthreads=128)
+
+H3K27me3_fru_peak <- featureCounts(files = filenames_H3K27me3,
+                  annot.ext = "regions/sicer/fru_no_poly.saf",
+                  isPairedEnd=TRUE,
+                  nthreads=128)
+
+#Normalize by length of each peak to get reads per basepair
+#Average Replicates
+
+vals_fru_1 = as.vector(H3K27me3_fru_peak$counts[,1])/H3K27me3_fru_peak$annotation$Length
+vals_fru_2 = as.vector(H3K27me3_fru_peak$counts[,2])/H3K27me3_fru_peak$annotation$Length
+vals_fru = rowMeans(cbind(vals_fru_1, vals_fru_2))
+
+vals_poly_1 = as.vector(H3K27me3_poly_peak$counts[,1])/H3K27me3_poly_peak$annotation$Length
+vals_poly_2 = as.vector(H3K27me3_poly_peak$counts[,2])/H3K27me3_poly_peak$annotation$Length
+vals_poly = rowMeans(cbind(vals_sicer_1, vals_sicer_2))
+
+#Write data to csv. Visualze in GraphPAD-PRISM
+
+max.len = max(length(vals_fru), length(vals_poly))
+vals_fru = c(vals_fru, rep(NA, max.len - length(vals_fru)))
+vals_poly = c(vals_poly, rep(NA, max.len - length(vals_poly)))
+data = data.frame(vals_fru, vals_poly)
+colnames(data) = c("Fru", "Poly")
+
+write.csv(data, file = "5G.csv")
+```
+
